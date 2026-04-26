@@ -1,0 +1,122 @@
+{
+  "project_info": {
+    "project_number": "595117846778",
+    "firebase_url": "https://maava-7ddea-default-rtdb.asia-southeast1.firebasedatabase.app",
+    "project_id": "maava-7ddea",
+    "storage_bucket": "maava-7ddea.firebasestorage.app"
+  },
+  "client": [
+    {
+      "client_info": {
+        "mobilesdk_app_id": "1:595117846778:android:d256a4f8ca4b8dd0b41943",
+        "android_client_info": {
+          "package_name": "com.maava.delivery"
+        }
+      },
+      "oauth_client": [
+        {
+          "client_id": "595117846778-re3n22vt8a2den541v42ak05ha916ctu.apps.googleusercontent.com",
+          "client_type": 1,
+          "android_info": {
+            "package_name": "com.maava.delivery",
+            "certificate_hash": "c787211b2a10a8016595f9b46aaef134e0a9f611"
+          }
+        },
+        {
+          "client_id": "595117846778-tv8dbdhigjfe25d463mkgk0q6trv70vs.apps.googleusercontent.com",
+          "client_type": 3
+        }
+      ],
+      "api_key": [
+        {
+          "current_key": "AIzaSyAk816xWLpXOSF4KFW4ms59acIN5mO_Z_U"
+        }
+      ],
+      "services": {
+        "appinvite_service": {
+          "other_platform_oauth_client": [
+            {
+              "client_id": "595117846778-tv8dbdhigjfe25d463mkgk0q6trv70vs.apps.googleusercontent.com",
+              "client_type": 3
+            }
+          ]
+        }
+      }
+    },
+    {
+      "client_info": {
+        "mobilesdk_app_id": "1:595117846778:android:b8a28e85304b8888b41943",
+        "android_client_info": {
+          "package_name": "com.maava.restaurant"
+        }
+      },
+      "oauth_client": [
+        {
+          "client_id": "595117846778-n411abrnuc8fu8j577uiofqj9h4d8r0r.apps.googleusercontent.com",
+          "client_type": 1,
+          "android_info": {
+            "package_name": "com.maava.restaurant",
+            "certificate_hash": "c787211b2a10a8016595f9b46aaef134e0a9f611"
+          }
+        },
+        {
+          "client_id": "595117846778-tv8dbdhigjfe25d463mkgk0q6trv70vs.apps.googleusercontent.com",
+          "client_type": 3
+        }
+      ],
+      "api_key": [
+        {
+          "current_key": "AIzaSyAk816xWLpXOSF4KFW4ms59acIN5mO_Z_U"
+        }
+      ],
+      "services": {
+        "appinvite_service": {
+          "other_platform_oauth_client": [
+            {
+              "client_id": "595117846778-tv8dbdhigjfe25d463mkgk0q6trv70vs.apps.googleusercontent.com",
+              "client_type": 3
+            }
+          ]
+        }
+      }
+    },
+    {
+      "client_info": {
+        "mobilesdk_app_id": "1:595117846778:android:1cf7944223f646b1b41943",
+        "android_client_info": {
+          "package_name": "com.maava.user"
+        }
+      },
+      "oauth_client": [
+        {
+          "client_id": "595117846778-1l44t204hj5slkb1o7v8nsb4a25jrtgr.apps.googleusercontent.com",
+          "client_type": 1,
+          "android_info": {
+            "package_name": "com.maava.user",
+            "certificate_hash": "91dff4a9b56e7025d981dfd7da98ced15ff55ad2"
+          }
+        },
+        {
+          "client_id": "595117846778-tv8dbdhigjfe25d463mkgk0q6trv70vs.apps.googleusercontent.com",
+          "client_type": 3
+        }
+      ],
+      "api_key": [
+        {
+          "current_key": "AIzaSyAk816xWLpXOSF4KFW4ms59acIN5mO_Z_U"
+        }
+      ],
+      "services": {
+        "appinvite_service": {
+          "other_platform_oauth_client": [
+            {
+              "client_id": "595117846778-tv8dbdhigjfe25d463mkgk0q6trv70vs.apps.googleusercontent.com",
+              "client_type": 3
+            }
+          ]
+        }
+      }
+    }
+  ],
+  "configuration_version": "1"
+}
