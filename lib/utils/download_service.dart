@@ -517,7 +517,7 @@ class DownloadService {
     if (!Platform.isAndroid) return;
 
     try {
-      const platform = MethodChannel('com.maava.restaurant/downloads');
+      const platform = MethodChannel('com.maava.delivery/downloads');
       final result = await platform.invokeMethod('addToDownloads', {
         'filePath': filePath,
         'fileName': filename,
