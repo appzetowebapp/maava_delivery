@@ -4,6 +4,7 @@ import 'package:flutter/services.dart';
 import 'package:flutter_overlay_window/flutter_overlay_window.dart';
 import 'package:external_app_launcher/external_app_launcher.dart';
 import 'package:webview_master_app/config/app_config.dart';
+import 'package:webview_master_app/utils/ringtone_player.dart';
 
 class OverlayBubble extends StatefulWidget {
   const OverlayBubble({super.key});
@@ -13,17 +14,30 @@ class OverlayBubble extends StatefulWidget {
 }
 
 class _OverlayBubbleState extends State<OverlayBubble> {
-  static const platform = MethodChannel('com.maava.restaurant/geolocation');
+  static const platform = MethodChannel('com.maava.delivery/geolocation');
 
   bool _hasIncomingOrder = false;
   String? _orderId;
   String? _orderTitle;
   String? _orderBody;
 
+  // True while the main app is in the foreground. Used to suppress ringtone
+  // playback if a NEW_ORDER message arrives after the app has already opened
+  // (race condition: CLEAR_ORDER can arrive before NEW_ORDER).
+  bool _appInForeground = false;
+
+  final RingtonePlayer _ringtonePlayer = RingtonePlayer();
+
   @override
   void initState() {
     super.initState();
     _listenToMessages();
+  }
+
+  @override
+  void dispose() {
+    _ringtonePlayer.dispose();
+    super.dispose();
   }
 
   void _listenToMessages() {
@@ -33,6 +47,13 @@ class _OverlayBubbleState extends State<OverlayBubble> {
         if (data is String && data.startsWith('{')) {
           final Map<String, dynamic> jsonData = jsonDecode(data);
           if (jsonData['type'] == 'NEW_ORDER') {
+            if (_appInForeground) {
+              // The main app is already open — do not start the ringtone.
+              // This handles the race where CLEAR_ORDER arrived before this
+              // NEW_ORDER message was processed by the overlay.
+              debugPrint('🔕 Overlay: NEW_ORDER ignored - app is in foreground');
+              return;
+            }
             setState(() {
               _hasIncomingOrder = true;
               _orderId = jsonData['orderId']?.toString();
@@ -40,11 +61,18 @@ class _OverlayBubbleState extends State<OverlayBubble> {
               _orderBody = jsonData['body']?.toString() ??
                   'You have a new delivery order';
             });
-            // Auto-expand overlay might be needed, but we rely on the 160x160 space
+            _ringtonePlayer.play();
           } else if (jsonData['type'] == 'CLEAR_ORDER') {
+            // Mark app as open so any late NEW_ORDER message is ignored.
+            _appInForeground = true;
             setState(() {
               _hasIncomingOrder = false;
             });
+            _ringtonePlayer.stop();
+          } else if (jsonData['type'] == 'APP_PAUSED') {
+            // App went to background — allow the next order to ring.
+            _appInForeground = false;
+            debugPrint('📱 Overlay: APP_PAUSED received, ready for next order');
           }
         }
       } catch (e) {
@@ -54,10 +82,11 @@ class _OverlayBubbleState extends State<OverlayBubble> {
   }
 
   Future<void> _openApp() async {
+    await _ringtonePlayer.stop();
     try {
       debugPrint('🔵 Launching app directly...');
       await LaunchApp.openApp(
-        androidPackageName: 'com.maava.restaurant',
+        androidPackageName: 'com.maava.delivery',
         openStore: false,
       );
       await FlutterOverlayWindow.shareData("OPEN_APP");
@@ -72,7 +101,7 @@ class _OverlayBubbleState extends State<OverlayBubble> {
     return Material(
       color: Colors.transparent,
       child: Center(
-        child: _hasIncomingOrder ? _buildOrderPopup() : _buildCompactBubble(),
+        child: _hasIncomingOrder ? _buildCompactBubble() : _buildCompactBubble(),
       ),
     );
   }
@@ -98,7 +127,7 @@ class _OverlayBubbleState extends State<OverlayBubble> {
                 color: AppConfig.primaryColor.withOpacity(0.1),
                 shape: BoxShape.circle,
                 image: const DecorationImage(
-                  image: AssetImage('assets/images/logo.png'),
+                  image: AssetImage('assets/images/logo_icon.png'),
                   fit: BoxFit.cover,
                 ),
               ),
@@ -191,6 +220,7 @@ class _OverlayBubbleState extends State<OverlayBubble> {
                 child: ElevatedButton(
                   onPressed: () async {
                     debugPrint('❌ Order rejected from overlay');
+                    await _ringtonePlayer.stop();
                     await FlutterOverlayWindow.shareData(jsonEncode({
                       'action': 'REJECT_ORDER',
                       'orderId': _orderId,

@@ -33,7 +33,7 @@ class WebViewScreen extends StatefulWidget {
 
 class _WebViewScreenState extends State<WebViewScreen>
     with WidgetsBindingObserver {
-  static const platform = MethodChannel('com.maava.restaurant/geolocation');
+  static const platform = MethodChannel('com.maava.delivery/geolocation');
   InAppWebViewController? _webViewController;
   bool _isLoading = true;
   double _loadingProgress = 0.0;
@@ -57,9 +57,33 @@ class _WebViewScreenState extends State<WebViewScreen>
   // Track API request bodies captured from JavaScript
   final Map<String, String> _apiRequestBodies = {};
 
+  StreamSubscription<Map<String, dynamic>>? _orderEventSubscription;
+  // Holds an order that arrived before the WebView finished loading so it can
+  // be dispatched to the page once onLoadStop fires.
+  Map<String, dynamic>? _pendingWebOrderTrigger;
+
+  // AT_DOCUMENT_START UserScript built synchronously in initState when a
+  // pending order is found.  Included in initialUserScripts so the order
+  // payload is available to the web app before any of its own JS runs.
+  UserScript? _earlyOrderInjectionScript;
+
   @override
   void initState() {
     super.initState();
+
+    // PrefsUtil is already initialised by main() before runApp, so this is a
+    // synchronous read.  If a pending order exists (written by the FCM
+    // background handler in the terminated-state isolate) we build an
+    // AT_DOCUMENT_START UserScript NOW, before build() is called, so the
+    // order payload lands in the web app's context before any of its own JS
+    // executes.  We also stash it in _pendingWebOrderTrigger so onLoadStop
+    // provides the normal post-load JS injection as a belt-and-suspenders
+    // fallback.
+    final _earlyOrder = PrefsUtil.getPendingOrder();
+    if (_earlyOrder != null) {
+      _earlyOrderInjectionScript = _buildEarlyOrderScript(_earlyOrder);
+      _pendingWebOrderTrigger = _earlyOrder;
+    }
 
     // Initialize pull-to-refresh controller
     _pullToRefreshController = PullToRefreshController(
@@ -81,7 +105,10 @@ class _WebViewScreenState extends State<WebViewScreen>
     _listenToConnectivityChanges();
     _checkInitialTrackingStatus();
     _listenToOverlayMessages();
+    _listenToOrderEvents();
     WidgetsBinding.instance.addObserver(this);
+    // Check for an order that arrived while the app was terminated or killed.
+    WidgetsBinding.instance.addPostFrameCallback((_) => _checkPendingOrder());
   }
 
   @override
@@ -89,9 +116,16 @@ class _WebViewScreenState extends State<WebViewScreen>
     if (state == AppLifecycleState.resumed) {
       debugPrint(
           '📱 App Resumed - Hiding overlay bubble (Service stays active)');
+      debugPrint('🚀 APP OPENED (lifecycle resumed) - stopping ringtone immediately');
       _lastResumeTime = DateTime.now();
       FlutterOverlayWindow.closeOverlay();
+      NotificationService().stopOrderRingtone();
+      // Show the order popup for any order that arrived while backgrounded.
+      _checkPendingOrder();
     } else if (state == AppLifecycleState.paused) {
+      // Tell the overlay the app is now in the background so it is ready to
+      // ring for the next incoming order.
+      FlutterOverlayWindow.shareData(jsonEncode({'type': 'APP_PAUSED'}));
       if (_isTrackingEnabled) {
         debugPrint('🏠 App Minimized - Showing overlay bubble');
         _showOverlayWindow();
@@ -261,7 +295,174 @@ class _WebViewScreenState extends State<WebViewScreen>
     WidgetsBinding.instance.removeObserver(this);
     _connectivitySubscription?.cancel();
     _overlaySubscription?.cancel();
+    _orderEventSubscription?.cancel();
     super.dispose();
+  }
+
+  /// Subscribe to the in-process order stream (foreground FCM messages).
+  void _listenToOrderEvents() {
+    _orderEventSubscription = NotificationService.orderStream.listen((order) {
+      debugPrint('🎯 ORDER EVENT received from stream: $order');
+      _triggerWebOrderPopup(order);
+    });
+  }
+
+  /// Check SharedPreferences for an order saved by the FCM background handler.
+  /// This is the bridge for the background and terminated states.
+  Future<void> _checkPendingOrder() async {
+    if (!mounted) return;
+    final order = PrefsUtil.getPendingOrder();
+    if (order != null) {
+      await PrefsUtil.clearPendingOrder();
+      debugPrint('🎯 PENDING ORDER found in prefs, triggering web popup: $order');
+      _triggerWebOrderPopup(order);
+    }
+  }
+
+  /// Trigger the web app's own order popup by injecting JavaScript.
+  ///
+  /// Queues the order if the WebView controller does not exist yet OR if the
+  /// page is still loading — both conditions mean the web app's JS hasn't
+  /// executed and its popup handler is not registered yet.  Once onLoadStop
+  /// fires the queued order is dispatched automatically.
+  Future<void> _triggerWebOrderPopup(Map<String, dynamic> order) async {
+    if (!mounted) return;
+
+    if (_webViewController == null || _isPageLoading) {
+      _pendingWebOrderTrigger = order;
+      debugPrint(
+          '🎯 WebView not ready (controller=${_webViewController != null}, loading=$_isPageLoading) — queuing order');
+      return;
+    }
+
+    _pendingWebOrderTrigger = null;
+    await _injectOrderPopupJS(order);
+  }
+
+  /// Injects JS that triggers the web app's own order popup.
+  ///
+  /// Three-layer approach (most-to-least reliable):
+  ///
+  /// 1. WebSocket replay — the web app shows the popup via its own WS handler
+  ///    exactly as if the backend had sent the message. Requires the
+  ///    __maavaOrderMsgTpl template to have been captured from a previous
+  ///    background session (see _wsInterceptScript). Polls until the WS is open.
+  ///
+  /// 2. Named function hooks — web app exposes window.onNewOrder etc.
+  ///
+  /// 3. CustomEvent('newOrder') — web app listens to window/document.
+  ///
+  /// All three are gated by a per-orderId dedup key so no double-popups.
+  Future<void> _injectOrderPopupJS(Map<String, dynamic> order) async {
+    if (_webViewController == null || !mounted) return;
+
+    String jsEscape(String s) => s
+        .replaceAll('\\', '\\\\')
+        .replaceAll("'", "\\'")
+        .replaceAll('\n', ' ')
+        .replaceAll('\r', '');
+
+    final orderId = jsEscape(order['orderId']?.toString() ?? '');
+    final title   = jsEscape(order['title']?.toString()   ?? 'New Order');
+    final body    = jsEscape(order['body']?.toString()    ?? '');
+
+    debugPrint('🎯 Injecting JS to trigger web order popup (orderId=$orderId)');
+
+    final js = """
+      (function() {
+        var orderId  = '$orderId';
+        var payload  = { orderId: orderId, title: '$title', body: '$body' };
+        var dedupeKey = '__maavaNewOrder_' + orderId;
+        if (window[dedupeKey]) return;
+
+        window.__pendingMaavaOrder = payload;
+
+        // --- Layer 1: WebSocket replay ---
+        // Replays the exact wire-format message that the backend would have sent
+        // through the app's own WS (Socket.io or raw). The web app's own message
+        // handler processes it and shows the popup naturally.
+        function tryWSReplay() {
+          if (window[dedupeKey]) return true;
+          if (typeof window.__maavaDispatchOrderViaWS !== 'function') return false;
+          if (window.__maavaDispatchOrderViaWS(orderId)) {
+            window[dedupeKey] = true;
+            return true;
+          }
+          return false;
+        }
+
+        // Poll every 500 ms for up to 15 s (Socket.io needs time to connect).
+        var wsAttempts = 0;
+        var wsTimer = setInterval(function() {
+          wsAttempts++;
+          if (tryWSReplay() || wsAttempts >= 30) clearInterval(wsTimer);
+        }, 500);
+
+        // --- Layer 2: named function hooks ---
+        function tryNamedHooks() {
+          if (window[dedupeKey]) return;
+          if (typeof window.onNewOrder        === 'function') { window[dedupeKey] = true; window.onNewOrder(orderId, payload);   return; }
+          if (typeof window.showOrderAlert    === 'function') { window[dedupeKey] = true; window.showOrderAlert(payload);        return; }
+          if (typeof window.handleNewOrder    === 'function') { window[dedupeKey] = true; window.handleNewOrder(payload);        return; }
+          if (typeof window.triggerOrderPopup === 'function') { window[dedupeKey] = true; window.triggerOrderPopup(payload);     return; }
+          if (typeof window.onOrderAlert      === 'function') { window[dedupeKey] = true; window.onOrderAlert(orderId, payload); return; }
+        }
+
+        // --- Layer 3: CustomEvent ---
+        function dispatchOrderEvent() {
+          if (window[dedupeKey]) return;
+          window.dispatchEvent(new CustomEvent('newOrder',   { detail: payload, bubbles: true }));
+          document.dispatchEvent(new CustomEvent('newOrder', { detail: payload, bubbles: true }));
+        }
+
+        dispatchOrderEvent();
+        tryNamedHooks();
+        [800, 2000, 4000].forEach(function(ms) {
+          setTimeout(function() { dispatchOrderEvent(); tryNamedHooks(); }, ms);
+        });
+      })();
+    """;
+
+    await _webViewController!.evaluateJavascript(source: js);
+  }
+
+  /// Build a UserScript injected at AT_DOCUMENT_START for the terminated-state
+  /// case.  Runs before any web-app code, making the order available via:
+  ///   • window.__pendingMaavaOrder  — web app can read during its own init
+  ///   • localStorage.__pendingMaavaOrder — survives SPA in-page navigation
+  ///   • 'newOrder' CustomEvent on DOMContentLoaded — caught by any listener
+  ///     the web app registers while parsing the HTML
+  UserScript _buildEarlyOrderScript(Map<String, dynamic> order) {
+    String esc(String s) => s
+        .replaceAll('\\', '\\\\')
+        .replaceAll("'", "\\'")
+        .replaceAll('\n', ' ')
+        .replaceAll('\r', '');
+
+    final orderId = esc(order['orderId']?.toString() ?? '');
+    final title   = esc(order['title']?.toString()   ?? 'New Order');
+    final body    = esc(order['body']?.toString()    ?? '');
+
+    return UserScript(
+      source: """
+        (function() {
+          var payload = { orderId: '$orderId', title: '$title', body: '$body' };
+
+          window.__pendingMaavaOrder = payload;
+          try { localStorage.setItem('__pendingMaavaOrder', JSON.stringify(payload)); } catch(e) {}
+
+          function dispatchOrderEvent() {
+            window.dispatchEvent(new CustomEvent('newOrder', { detail: payload, bubbles: true }));
+            document.dispatchEvent(new CustomEvent('newOrder', { detail: payload, bubbles: true }));
+          }
+
+          document.addEventListener('DOMContentLoaded', dispatchOrderEvent);
+          if (document.readyState !== 'loading') dispatchOrderEvent();
+        })();
+      """,
+      injectionTime: UserScriptInjectionTime.AT_DOCUMENT_START,
+      forMainFrameOnly: true,
+    );
   }
 
   Future<bool> _onWillPop() async {
@@ -285,6 +486,7 @@ class _WebViewScreenState extends State<WebViewScreen>
     try {
       await NotificationService().initialize();
       await NotificationService().requestPermission();
+      await NotificationService().requestFullScreenIntentPermission();
       debugPrint('✅ Notification service ready');
       await _saveFCMTokenIfPhoneAvailable();
     } catch (e) {
@@ -1366,7 +1568,7 @@ class _WebViewScreenState extends State<WebViewScreen>
                           source: """
                             (function() {
                               // Polyfills for Firebase/Web Compatibility
-                              
+
                               // 1. Force isSecureContext to true
                               if (!window.isSecureContext) {
                                   Object.defineProperty(window, 'isSecureContext', { get: () => true });
@@ -1381,7 +1583,7 @@ class _WebViewScreenState extends State<WebViewScreen>
                                 };
                               }
 
-                              // Note: IndexedDB and ServiceWorker mocks removed as they caused 
+                              // Note: IndexedDB and ServiceWorker mocks removed as they caused
                               // 'auth/network-request-failed' by interfering with Firebase SDK internals.
                               // InAppWebView 6.x supports these natively on modern Android.
 
@@ -1391,6 +1593,119 @@ class _WebViewScreenState extends State<WebViewScreen>
                           injectionTime:
                               UserScriptInjectionTime.AT_DOCUMENT_START,
                         ),
+
+                        // PERMANENT: WebSocket intercept — runs on EVERY page load.
+                        //
+                        // Purpose: the web app's order popup is triggered by a
+                        // WebSocket message from the backend (Socket.io / raw WS).
+                        // When the app is in the background the WS is alive so the
+                        // popup appears naturally. When the app is terminated the WS
+                        // is gone and the backend does NOT replay the missed event.
+                        //
+                        // This script:
+                        //   1. Patches window.WebSocket BEFORE Socket.io loads so
+                        //      every connection is tracked.
+                        //   2. Observes incoming messages; when one looks like an
+                        //      order notification it saves the raw wire format
+                        //      (including Socket.io framing) to localStorage under
+                        //      '__maavaOrderMsgTpl'. This template is captured from
+                        //      the background case (WS already alive).
+                        //   3. Exposes window.__maavaDispatchOrderViaWS(orderId)
+                        //      which substitutes the orderId into the saved template
+                        //      and dispatches it as a synthetic MessageEvent on the
+                        //      open WebSocket. Socket.io's own onmessage handler
+                        //      processes it and the web app shows the popup.
+                        UserScript(
+                          source: r"""
+                            (function() {
+                              if (window.__maavaWSPatched) return;
+                              window.__maavaWSPatched = true;
+
+                              var NativeWS = window.WebSocket;
+                              if (!NativeWS) return;
+
+                              var _sockets = [];
+                              window.__maavaWSSockets = _sockets;
+
+                              // Observe a WebSocket for incoming order messages.
+                              function observe(ws) {
+                                ws.addEventListener('message', function(evt) {
+                                  var d = evt.data;
+                                  if (typeof d !== 'string' || d.length < 15) return;
+                                  var lc = d.toLowerCase();
+                                  // Must mention 'order' and carry some id field.
+                                  if (!lc.includes('order')) return;
+                                  if (!lc.includes('orderid') && !lc.includes('order_id')) return;
+                                  try {
+                                    localStorage.setItem('__maavaOrderMsgTpl', d);
+                                    console.log('[Maava] WS order template captured (' + d.length + ' bytes)');
+                                  } catch(e) {}
+                                });
+                              }
+
+                              // Wrap the WebSocket constructor so we track all connections.
+                              function PatchedWS(url, protocols) {
+                                var ws = protocols
+                                  ? new NativeWS(url, protocols)
+                                  : new NativeWS(url);
+                                _sockets.push(ws);
+                                observe(ws);
+                                return ws; // return native object so instanceof still works
+                              }
+                              ['CONNECTING','OPEN','CLOSING','CLOSED'].forEach(function(k) {
+                                PatchedWS[k] = NativeWS[k];
+                              });
+                              PatchedWS.prototype = NativeWS.prototype;
+                              window.WebSocket = PatchedWS;
+
+                              // Called from _injectOrderPopupJS when the app opens
+                              // from a terminated state with a pending order.
+                              window.__maavaDispatchOrderViaWS = function(orderId) {
+                                var tpl = '';
+                                try { tpl = localStorage.getItem('__maavaOrderMsgTpl') || ''; } catch(e) {}
+                                if (!tpl) {
+                                  console.log('[Maava] No WS template yet — order replay skipped');
+                                  return false;
+                                }
+
+                                var open = _sockets.filter(function(s) {
+                                  return s.readyState === 1; /* OPEN */
+                                });
+                                if (!open.length) return false;
+
+                                // Substitute the new orderId into the captured template.
+                                // (?:"[^"]*"|\d+) matches a JSON string value OR
+                                // a bare integer — covers both common formats and
+                                // Socket.io framing such as 42["event",{...}].
+                                var msg = tpl
+                                  .replace(/"orderId"\s*:\s*(?:"[^"]*"|\d+)/g,  '"orderId":"' + orderId + '"')
+                                  .replace(/"order_id"\s*:\s*(?:"[^"]*"|\d+)/g, '"order_id":"' + orderId + '"');
+
+                                var ok = false;
+                                open.forEach(function(s) {
+                                  try {
+                                    s.dispatchEvent(new MessageEvent('message', { data: msg }));
+                                    ok = true;
+                                  } catch(e) {
+                                    console.error('[Maava] WS dispatch error:', e);
+                                  }
+                                });
+                                if (ok) console.log('[Maava] WS order replayed for orderId=' + orderId);
+                                return ok;
+                              };
+                            })();
+                          """,
+                          injectionTime:
+                              UserScriptInjectionTime.AT_DOCUMENT_START,
+                          forMainFrameOnly: true,
+                        ),
+
+                        // Injected synchronously from initState when the app was
+                        // opened by an FCM push in the terminated state.  Runs
+                        // before ANY web-app code so the order payload is
+                        // available from the very first moment the page starts.
+                        if (_earlyOrderInjectionScript != null)
+                          _earlyOrderInjectionScript!,
                       ]),
                       initialSettings: InAppWebViewSettings(
                         userAgent:
@@ -1702,6 +2017,27 @@ class _WebViewScreenState extends State<WebViewScreen>
                         await _injectPhoneCaptureScript(controller);
                         await _injectLinkInterceptorScript(controller);
                         await _injectApiInterceptorScript(controller);
+                        // Dispatch any order that arrived before the page was
+                        // ready.  We check two sources:
+                        //   1. _pendingWebOrderTrigger — set when an order
+                        //      event arrived while the controller was busy.
+                        //   2. SharedPreferences — written by the FCM
+                        //      background isolate; covers the terminated-state
+                        //      case where addPostFrameCallback may not have run
+                        //      yet when onLoadStop fires.
+                        Map<String, dynamic>? orderToDispatch =
+                            _pendingWebOrderTrigger;
+                        if (orderToDispatch == null) {
+                          orderToDispatch = PrefsUtil.getPendingOrder();
+                          if (orderToDispatch != null) {
+                            await PrefsUtil.clearPendingOrder();
+                          }
+                        }
+                        if (orderToDispatch != null) {
+                          _pendingWebOrderTrigger = null;
+                          // _isPageLoading is already false here, so inject directly.
+                          await _injectOrderPopupJS(orderToDispatch);
+                        }
                       },
                       onProgressChanged: (controller, progress) {
                         setState(() {
@@ -2156,3 +2492,4 @@ class _WebViewScreenState extends State<WebViewScreen>
     );
   }
 }
+

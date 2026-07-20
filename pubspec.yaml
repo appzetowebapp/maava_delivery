@@ -2,7 +2,7 @@ name: webview_master_app
 description: A feature-rich Flutter WebView application with splash screen, onboarding, and permissions.
 publish_to: 'none'
 # version: 1.0.0+1
-version: 1.0.2+5
+version: 1.0.2+11
 
 environment:
   sdk: '>=3.0.0 <4.0.0'
@@ -72,6 +72,7 @@ flutter:
   assets:
     - assets/images/
     - assets/onboarding/
+    - assets/sounds/
 
   # Fonts (optional - uncomment to add custom fonts)
   # fonts:
