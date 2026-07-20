@@ -43,7 +43,7 @@ Edit `lib/config/app_config.dart`:
 ```dart
 // App Identity
 static const String appName = 'Your App Name';
-static const String logoPath = 'assets/images/logo.png';
+static const String logoPath = 'assets/images/logo_icon.png';
 
 // Colors
 static const Color primaryColor = Color(0xFF6366F1);
@@ -65,7 +65,7 @@ static final List<OnboardingPage> onboardingPages = [
 ### 3. Add Your Assets
 
 Replace these files with your own:
-- `assets/images/logo.png` - Your app logo
+- `assets/images/logo_icon.png` - Your app logo
 - `assets/onboarding/onboarding_1.png` - Onboarding slide 1
 - `assets/onboarding/onboarding_2.png` - Onboarding slide 2
 - `assets/onboarding/onboarding_3.png` - Onboarding slide 3
@@ -470,3 +470,4 @@ adb logcat | grep "🌐\|📁\|📍\|✅"
 
 **Star ⭐ this repo if you find it helpful!**
 
+# maava_delivery
