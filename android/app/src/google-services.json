@@ -47,7 +47,7 @@
       "client_info": {
         "mobilesdk_app_id": "1:595117846778:android:b8a28e85304b8888b41943",
         "android_client_info": {
-          "package_name": "com.maava.restaurant"
+          "package_name": "com.maava.delivery"
         }
       },
       "oauth_client": [
@@ -55,7 +55,7 @@
           "client_id": "595117846778-n411abrnuc8fu8j577uiofqj9h4d8r0r.apps.googleusercontent.com",
           "client_type": 1,
           "android_info": {
-            "package_name": "com.maava.restaurant",
+            "package_name": "com.maava.delivery",
             "certificate_hash": "c787211b2a10a8016595f9b46aaef134e0a9f611"
           }
         },

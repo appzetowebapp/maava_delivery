@@ -54,8 +54,7 @@ unlinked_spec.ds
 **/android/gradlew.bat
 **/android/local.properties
 **/android/**/GeneratedPluginRegistrant.java
-**/android/key.properties
-*.jks
+
 
 # iOS/XCode related
 **/ios/**/*.mode1v3
@@ -117,3 +116,7 @@ app.*.symbols
 !**/ios/**/default.perspectivev3
 !/packages/flutter_tools/test/data/dart_dependencies_test/**/.packages
 !/dev/ci/**/Gemfile.lock
+branch_structure.json
+temp_auto_push.bat
+temp_interactive_push.bat
+.gitignore
