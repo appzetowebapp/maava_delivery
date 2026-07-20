@@ -1,3 +1,4 @@
+import 'dart:async';
 import 'package:flutter/material.dart';
 import 'package:flutter_local_notifications/flutter_local_notifications.dart';
 import 'package:permission_handler/permission_handler.dart';
@@ -6,7 +7,10 @@ import 'package:webview_master_app/services/api_service.dart';
 import 'package:webview_master_app/config/app_config.dart';
 import 'dart:io' show Platform;
 import 'dart:convert';
-import 'package:flutter_overlay_window/flutter_overlay_window.dart';
+import 'dart:typed_data';
+import 'package:flutter_overlay_window/flutter_overlay_window.dart'
+    hide NotificationVisibility;
+import 'package:webview_master_app/utils/ringtone_player.dart';
 
 /// Notification Service - Handles system tray notifications
 class NotificationService {
@@ -26,6 +30,33 @@ class NotificationService {
   // Track shown notifications to prevent duplicates
   final Set<String> _shownNotificationIds = <String>{};
   final Map<String, DateTime> _notificationTimestamps = <String, DateTime>{};
+
+  // Looping ringtone played for new order alerts in this (main) isolate
+  final RingtonePlayer _ringtonePlayer = RingtonePlayer();
+
+  // Broadcast stream for new-order events so the WebView screen can show an
+  // in-app popup immediately, even when the app is already in the foreground.
+  static final StreamController<Map<String, dynamic>> _orderEventController =
+      StreamController<Map<String, dynamic>>.broadcast();
+
+  /// Listen to this stream to receive new-order events in the UI layer.
+  static Stream<Map<String, dynamic>> get orderStream =>
+      _orderEventController.stream;
+
+  /// Stop the ringtone (this isolate) and ask the overlay isolate to stop
+  /// its own ringtone loop too. Call this once the app is genuinely opened
+  /// by the user (e.g. notification tap, or auto-open after the device is
+  /// unlocked) - not merely because a notification was posted/shown.
+  Future<void> stopOrderRingtone() async {
+    debugPrint('🔕 stopOrderRingtone() called - stopping ringtone in main isolate and notifying overlay');
+    await _ringtonePlayer.stop();
+    try {
+      await FlutterOverlayWindow.shareData(jsonEncode({'type': 'CLEAR_ORDER'}));
+      debugPrint('🔕 Overlay notified with CLEAR_ORDER');
+    } catch (e) {
+      debugPrint('⚠️ Could not notify overlay to clear order: $e');
+    }
+  }
 
   /// Initialize notification service
   Future<void> initialize() async {
@@ -116,6 +147,26 @@ class NotificationService {
           .then((RemoteMessage? message) {
         if (message != null) {
           debugPrint('📨 App opened from notification: ${message.messageId}');
+          debugPrint('🚀 APP OPENED AUTOMATICALLY - launched from terminated state via notification');
+          stopOrderRingtone();
+
+          // Check if this was a new-order notification and emit the event so
+          // the in-app popup is shown (SharedPreferences is the primary bridge
+          // for this case, but the stream handles apps that were already open).
+          final data = message.data;
+          final normalizedType = data['type']?.toString().toUpperCase();
+          final isOrder = normalizedType == 'ORDER' ||
+              normalizedType == 'NEW_ORDER' ||
+              normalizedType == 'NEW_ORDER_AVAILABLE';
+          if (isOrder) {
+            final orderEvent = {
+              'orderId': data['orderId'] ?? data['order_id'] ?? data['id'] ?? '',
+              'title': message.notification?.title ?? data['title']?.toString() ?? 'New Order',
+              'body': message.notification?.body ?? data['body']?.toString() ?? 'You have a new delivery order',
+            };
+            debugPrint('🎯 ORDER EVENT: emitting from getInitialMessage for in-app popup');
+            _orderEventController.add(orderEvent);
+          }
         }
       });
 
@@ -129,11 +180,22 @@ class NotificationService {
 
   /// Handle foreground FCM messages
   Future<void> _handleForegroundMessage(RemoteMessage message) async {
-    debugPrint('📨 Foreground message received: ${message.messageId}');
-    debugPrint('📨 Message data: ${message.data}');
+    final data = message.data;
+
+    debugPrint('================ FCM RECEIVED (FOREGROUND) ================');
+    debugPrint('📦 Raw message.toMap(): ${message.toMap()}');
+    debugPrint('📝 Title: ${message.notification?.title}');
+    debugPrint('📝 Body: ${message.notification?.body}');
+    debugPrint('📋 Data: $data');
+    debugPrint('🆔 MessageId: ${message.messageId}');
+    debugPrint('🆔 OrderId: ${data['orderId'] ?? data['order_id'] ?? data['id']}');
+    debugPrint('🏷️ Type: ${data['type']}');
+    debugPrint('👤 UserId: ${data['userId'] ?? data['user_id']}');
+    debugPrint('🚚 DeliveryPartnerId: ${data['deliveryPartnerId'] ?? data['delivery_partner_id'] ?? data['partnerId'] ?? data['riderId']}');
+    debugPrint('📱 App State: foreground');
+    debugPrint('=============================================================');
 
     RemoteNotification? notification = message.notification;
-    Map<String, dynamic>? data = message.data;
 
     // Create unique ID for this notification
     String notificationId = message.messageId ?? '';
@@ -141,24 +203,36 @@ class NotificationService {
     // Clean old notification IDs (older than 5 minutes)
     _cleanOldNotificationIds();
 
-    // Notify overlay if this is a new order
-    final isOrder = data['type'] == 'order' || 
-                    data['type'] == 'NEW_ORDER' ||
-                    (notification?.title?.toLowerCase().contains('order') ?? false) ||
-                    (notification?.body?.toLowerCase().contains('order') ?? false);
+    // Only the dedicated "new order" data type should trigger the order
+    // ringtone/alarm channel. Status updates, accept/reject, cancellations,
+    // promos, etc. must never play the ringtone, even if their title/body
+    // happens to contain the word "order".
+    final type = data['type']?.toString();
+    final normalizedType = type?.toUpperCase();
+    final isOrder = normalizedType == 'ORDER' ||
+        normalizedType == 'NEW_ORDER' ||
+        normalizedType == 'NEW_ORDER_AVAILABLE';
 
+    debugPrint('🔎 isOrder evaluation: type="$type" (normalized="$normalizedType") -> isOrder=$isOrder');
+
+    // Note: the app is in the foreground/active for FCM.onMessage to fire at
+    // all, so the looping order ringtone must NOT be started here (and the
+    // overlay must not be told to start its own ringtone either) - per
+    // product requirement, the ringtone only plays while the app is in the
+    // background, locked, or terminated.
     if (isOrder) {
-      try {
-        debugPrint('🔔 Foreground order detected, notifying overlay...');
-        await FlutterOverlayWindow.shareData(jsonEncode({
-          'type': 'NEW_ORDER',
-          'orderId': data['orderId'] ?? data['id'],
-          'title': notification?.title ?? 'New Order',
-          'body': notification?.body ?? 'You have a new delivery order',
-        }));
-      } catch (e) {
-        debugPrint('❌ Failed to notify overlay in foreground: $e');
-      }
+      debugPrint('🔔 Sound/ringtone trigger status: SKIPPED (app is in foreground/active, ringtone only plays in background/locked/terminated)');
+      // Emit the order event so the in-app popup is shown immediately while
+      // the app is in the foreground.
+      final orderEvent = {
+        'orderId': data['orderId'] ?? data['order_id'] ?? data['id'] ?? '',
+        'title': message.notification?.title ?? data['title']?.toString() ?? 'New Order',
+        'body': message.notification?.body ?? data['body']?.toString() ?? 'You have a new delivery order',
+      };
+      debugPrint('🎯 ORDER EVENT: emitting to orderStream for in-app popup');
+      _orderEventController.add(orderEvent);
+    } else {
+      debugPrint('🔔 Sound/ringtone trigger status: SKIPPED (not an order message)');
     }
 
     if (notification != null) {
@@ -173,6 +247,7 @@ class NotificationService {
       // Check if this notification was already shown (prevent duplicates)
       if (_shownNotificationIds.contains(uniqueId)) {
         debugPrint('⚠️ Duplicate notification detected, skipping: $uniqueId');
+        debugPrint('🖼️ POPUP: skipped (duplicate) - $uniqueId');
         return;
       }
 
@@ -197,6 +272,7 @@ class NotificationService {
       }
 
       // Show notification
+      debugPrint('🖼️ POPUP: showing (notification payload) - $uniqueId, isOrderAlert=$isOrder');
       await showNotification(
         title: notification.title ?? 'Notification',
         body: notification.body ?? '',
@@ -204,6 +280,7 @@ class NotificationService {
         imageUrl: notification.android?.imageUrl ??
             notification.apple?.imageUrl?.toString(),
         notificationId: uniqueId,
+        isOrderAlert: isOrder,
       );
     } else if (data.isNotEmpty) {
       // Handle data-only messages
@@ -221,6 +298,7 @@ class NotificationService {
       if (_shownNotificationIds.contains(uniqueId)) {
         debugPrint(
             '⚠️ Duplicate data-only notification detected, skipping: $uniqueId');
+        debugPrint('🖼️ POPUP: skipped (duplicate) - $uniqueId');
         return;
       }
 
@@ -236,12 +314,16 @@ class NotificationService {
         await requestPermission();
       }
 
+      debugPrint('🖼️ POPUP: showing (data-only) - $uniqueId, isOrderAlert=$isOrder');
       await showNotification(
         title: title,
         body: body,
         payload: data.toString(),
         notificationId: uniqueId,
+        isOrderAlert: isOrder,
       );
+    } else {
+      debugPrint('🖼️ POPUP: skipped - no notification payload and no data');
     }
   }
 
@@ -319,14 +401,61 @@ class NotificationService {
         ledColor: AppConfig.notificationColor,
       );
 
+      // Dedicated high-priority channel for new order alerts, with a
+      // custom looping-friendly ringtone and alarm audio attributes so it
+      // is audible on the lock screen and over silent/vibrate modes.
+      final AndroidNotificationChannel orderChannel = AndroidNotificationChannel(
+        AppConfig.orderNotificationChannelId,
+        AppConfig.orderNotificationChannelName,
+        description: AppConfig.orderNotificationChannelDescription,
+        importance: Importance.max,
+        playSound: true,
+        sound: RawResourceAndroidNotificationSound(
+            AppConfig.orderRingtoneRawResource),
+        audioAttributesUsage: AudioAttributesUsage.alarm,
+        enableVibration: true,
+        vibrationPattern: Int64List.fromList(
+            <int>[0, 1000, 500, 1000, 500, 1000, 500, 1000]),
+        showBadge: true,
+        enableLights: true,
+        ledColor: AppConfig.notificationColor,
+      );
+
+      // The backend sends `notification.android.channelId: "maava_channel"`
+      // for order pushes. Create that exact channel with the same
+      // alarm-style settings so the system's auto-displayed notification
+      // still rings loudly and shows on the lock screen.
+      final AndroidNotificationChannel fcmOrderChannel = AndroidNotificationChannel(
+        AppConfig.fcmOrderChannelId,
+        AppConfig.orderNotificationChannelName,
+        description: AppConfig.orderNotificationChannelDescription,
+        importance: Importance.max,
+        playSound: true,
+        sound: RawResourceAndroidNotificationSound(
+            AppConfig.orderRingtoneRawResource),
+        audioAttributesUsage: AudioAttributesUsage.alarm,
+        enableVibration: true,
+        vibrationPattern: Int64List.fromList(
+            <int>[0, 1000, 500, 1000, 500, 1000, 500, 1000]),
+        showBadge: true,
+        enableLights: true,
+        ledColor: AppConfig.notificationColor,
+      );
+
       final androidImplementation =
           _notificationsPlugin.resolvePlatformSpecificImplementation<
               AndroidFlutterLocalNotificationsPlugin>();
 
       if (androidImplementation != null) {
         await androidImplementation.createNotificationChannel(channel);
+        await androidImplementation.createNotificationChannel(orderChannel);
+        await androidImplementation.createNotificationChannel(fcmOrderChannel);
         debugPrint(
             '✅ Notification channel created: ${AppConfig.notificationChannelId}');
+        debugPrint(
+            '✅ Order alert channel created: ${AppConfig.orderNotificationChannelId}');
+        debugPrint(
+            '✅ FCM order channel created: ${AppConfig.fcmOrderChannelId}');
         debugPrint('   Channel importance: ${channel.importance}');
         debugPrint('   Channel color: ${AppConfig.notificationColor}');
       } else {
@@ -339,7 +468,13 @@ class NotificationService {
 
   /// Handle notification tap
   void _onNotificationTapped(NotificationResponse response) {
-    debugPrint('📱 Notification tapped: ${response.payload}');
+    debugPrint('================ NOTIFICATION TAPPED ================');
+    debugPrint('📱 Response type: ${response.notificationResponseType}');
+    debugPrint('📱 Notification ID: ${response.id}');
+    debugPrint('📱 Action ID: ${response.actionId}');
+    debugPrint('📱 Payload: ${response.payload}');
+    debugPrint('======================================================');
+    stopOrderRingtone();
   }
 
   /// Request notification permission
@@ -379,6 +514,24 @@ class NotificationService {
     }
   }
 
+  /// Request permission to use full-screen intent notifications (Android 14+).
+  /// Required for order alerts to auto-launch the app from the background,
+  /// lock screen, or terminated state. On older Android versions this
+  /// permission is granted automatically.
+  Future<void> requestFullScreenIntentPermission() async {
+    if (!Platform.isAndroid) return;
+    try {
+      final androidImplementation =
+          _notificationsPlugin.resolvePlatformSpecificImplementation<
+              AndroidFlutterLocalNotificationsPlugin>();
+      final granted =
+          await androidImplementation?.requestFullScreenIntentPermission();
+      debugPrint('🔔 Full-screen intent permission granted: $granted');
+    } catch (e) {
+      debugPrint('❌ Error requesting full-screen intent permission: $e');
+    }
+  }
+
   /// Show notification in system tray
   Future<void> showNotification({
     required String title,
@@ -386,6 +539,7 @@ class NotificationService {
     String? payload,
     String? imageUrl,
     String? notificationId,
+    bool isOrderAlert = false,
   }) async {
     debugPrint('🔔 showNotification called - Title: "$title", Body: "$body"');
 
@@ -424,32 +578,36 @@ class NotificationService {
     // Android notification details
     final AndroidNotificationDetails androidDetails =
         AndroidNotificationDetails(
-      AppConfig.notificationChannelId, // Must match channel ID
-      AppConfig.notificationChannelName, // Must match channel name
-      channelDescription: AppConfig.notificationChannelDescription,
+      isOrderAlert
+          ? AppConfig.orderNotificationChannelId
+          : AppConfig.notificationChannelId, // Must match channel ID
+      isOrderAlert
+          ? AppConfig.orderNotificationChannelName
+          : AppConfig.notificationChannelName, // Must match channel name
+      channelDescription: isOrderAlert
+          ? AppConfig.orderNotificationChannelDescription
+          : AppConfig.notificationChannelDescription,
       importance: Importance.max,
       priority: Priority.max,
       playSound: true,
+      sound: isOrderAlert
+          ? RawResourceAndroidNotificationSound(
+              AppConfig.orderRingtoneRawResource)
+          : null,
+      audioAttributesUsage: isOrderAlert
+          ? AudioAttributesUsage.alarm
+          : AudioAttributesUsage.notification,
       enableVibration: true,
       icon: AppConfig.notificationIcon,
       showWhen: true,
       styleInformation: const BigTextStyleInformation(''),
       color: AppConfig.notificationColor,
-      // Add buttons for Accept and Reject
-      actions: <AndroidNotificationAction>[
-        const AndroidNotificationAction(
-          'ACCEPT_ACTION',
-          'Accept',
-          showsUserInterface: true,
-          cancelNotification: true,
-        ),
-        const AndroidNotificationAction(
-          'REJECT_ACTION',
-          'Reject',
-          showsUserInterface: false,
-          cancelNotification: true,
-        ),
-      ],
+      // Order alerts use a full-screen intent so the app auto-launches even
+      // from the background, lock screen, or terminated state. Once the app
+      // opens, didChangeAppLifecycleState(resumed) stops the ringtone
+      // immediately (see webview_screen.dart).
+      fullScreenIntent: isOrderAlert,
+      visibility: isOrderAlert ? NotificationVisibility.public : null,
     );
 
     // iOS notification details
