@@ -14,8 +14,8 @@ import 'package:flutter/material.dart';
 @pragma('vm:entry-point')
 class AppConfig {
   // ==================== APP IDENTITY ====================
-  static const String appName = 'Maava Restaurant';
-  static const String appLogoPath = 'assets/images/logo.png';
+  static const String appName = 'Maava Delivery';
+  static const String appLogoPath = 'assets/images/logo_icon.png';
 
   // ==================== COLORS & THEME ====================
   static const Color primaryColor = Color(0xFFB3B3B3); // Indigo
@@ -57,7 +57,7 @@ class AppConfig {
 
   // ==================== WEB URL CONFIGURATION ====================
   // ⚠️ CHANGE THIS URL TO YOUR WEB APPLICATION ⚠️
-  static const String webUrl = 'https://maava.in/restaurant/login';
+  static const String webUrl = 'https://maava.in/delivery';
  
   static const String notificationIcon =
       '@mipmap/ic_launcher'; // Default app launcher icon
@@ -76,6 +76,28 @@ class AppConfig {
   static const String notificationChannelDescription =
       'Notifications from the website and push notifications';
 
+  // ==================== NEW ORDER ALERT CHANNEL ====================
+  // Dedicated high-priority channel so the custom ringtone & lock-screen
+  // behaviour apply even on devices where `notificationChannelId` was
+  // already created with the old (immutable) settings.
+  static const String orderNotificationChannelId = 'new_order_alerts';
+  static const String orderNotificationChannelName = 'New Order Alerts';
+  static const String orderNotificationChannelDescription =
+      'High priority alerts for new incoming orders';
+
+  // Channel ID the backend specifies in the FCM `notification.android.channelId`
+  // field for new-order pushes ("maava_channel"). Created locally with the
+  // same order-alert settings so the system's auto-displayed notification
+  // (for messages that include a `notification` payload) also gets the loud
+  // alarm sound and lock-screen visibility.
+  static const String fcmOrderChannelId = 'maava_channel';
+
+  // Android raw resource name (no extension) at android/app/src/main/res/raw/
+  static const String orderRingtoneRawResource = 'order_ring';
+
+  // Flutter asset path (relative to assets/) for audioplayers looping playback
+  static const String orderRingtoneAsset = 'sounds/order_ring.mp3';
+
   // ==================== API CONFIGURATION ====================
   // Base URL for API endpoints (update this with your actual API base URL)
   static const String apiBaseUrl = 'https://api.maava.in/api/';
@@ -87,8 +109,8 @@ class AppConfig {
   // ==================== ONBOARDING ====================
   static const List<OnboardingPage> onboardingPages = [
     OnboardingPage(
-      title: 'Welcome to Maava Restaurant',
-      description: 'Experience seamless delivery with the Maava Restaurant app.',
+      title: 'Welcome to Maava Delivery',
+      description: 'Experience seamless delivery with the Maava Delivery app.',
       imagePath: 'assets/onboarding/onboarding1.png',
     ),
     OnboardingPage(
